@@ -24,12 +24,12 @@ flowchart TB
 
     subgraph Application["⚙️ 2. APPLICATION (Orchestrateur LangGraph)"]
         direction TB
-        Graph["🧠 Machine d'États LangGraph<br/><b>Actions principales :</b><br/>• <i>Orchestre</i> le flux séquentiel des nœuds<br/>• <i>Transmet</i> la mémoire partagée (State)<br/>• <i>Applique</i> les seuils de dépenses (Plafond repas 45€)<br/>• <i>Arbitre</i> la décision finale (APPROVED / REJECTED)"]
+        Graph["🧠 Machine d'États LangGraph<br/><b>Actions principales :</b><br/>• <i>Orchestre</i> le flux séquentiel des nœuds<br/>• <i>Transmet</i> la mémoire partagée (State)<br/>• <i>Coordonne</i> les appels aux adaptateurs<br/>• <i>Émet</i> la décision finale (AuditDecision)"]
     end
 
     subgraph Domain["💎 3. DOMAINE MÉTIER (Cœur Pur & Invariable)"]
         direction TB
-        Models["📦 Entités Pydantic V2<br/><b>Action :</b> <i>Définit</i> et <i>Valide</i> la structure des données pures"]
+        Models["📦 Entités & Règles Métier Pydantic V2<br/><b>Actions principales :</b><br/>• <i>Valide</i> la cohérence financière (Montants > 0, TVA)<br/>• <i>Contrôle</i> les règles de gestion (Plafond repas 45€)<br/>• <i>Attribue</i> le statut (APPROVED, FLAGGED, REJECTED)"]
         Ports["🔌 Interfaces Abstraites (Ports)<br/><b>Action :</b> <i>Impose</i> les contrats stricts aux outils externes"]
     end
 
@@ -43,7 +43,7 @@ flowchart TB
 
     %% Relations avec verbes d'action
     Interfaces -->|📥 Transmet le fichier brut| Application
-    Application -->|📐 Utilise les règles & types| Domain
+    Application -->|📐 Interroge les règles de gestion & modèles| Domain
     Infrastructure -.->|🤝 Respecte les contrats| Ports
     Application -->|⚡ Déclenche les adaptateurs| Infrastructure
 ```
@@ -52,7 +52,7 @@ flowchart TB
 
 ## 🔄 Flux Séquentiel d'un Reçu (Workflow d'Audit)
 
-Le parcours étape par étape avec les actions effectuées à chaque maillon de la chaîne :
+Le parcours étape par étape intégrant le **Domaine Métier** pour le contrôle des règles de gestion :
 
 ```mermaid
 sequenceDiagram
@@ -62,23 +62,26 @@ sequenceDiagram
     participant LangGraph as ⚙️ Orchestrateur
     participant OCR as 👁️ OpenCV / EasyOCR
     participant LLM as 🧠 Moteur IA (LLM)
-    participant SIRENE as 🏛️ Registre Légal
-    participant SQLite as 💾 Base de Données
+    participant SIRENE as 🏛️ Registre SIRENE
+    participant SQLite as 💾 Base SQLite
+    participant Domaine as 💎 Domaine (Règles & Modèles)
 
     Employe->>Bot: 1. 📤 Envoie la photo du ticket
     Bot->>LangGraph: 2. 🚀 Initialise le flux avec l'image binaire
     LangGraph->>OCR: 3. 🔍 Prétraite l'image & Extrait le texte brut
     OCR-->>LangGraph: 4. 📄 Retourne le texte brut
-    LangGraph->>LLM: 5. 🧩 Parse & Structure en JSON (Montants, TVA, Date)
-    LLM-->>LangGraph: 6. 📊 Retourne l'objet ReceiptExtraction
-    LangGraph->>SIRENE: 7. 🔎 Vérifie le SIREN / Nom du commerçant
-    SIRENE-->>LangGraph: 8. ✅ Confirme l'activité légale de l'entreprise
-    LangGraph->>SQLite: 9. 🔐 Calcule l'empreinte SHA-256 & Détecte les doublons
-    SQLite-->>LangGraph: 10. 🛡️ Confirme l'absence de doublon
-    LangGraph->>LangGraph: 11. ⚖️ Évalue le respect du plafond (45€ repas)
-    LangGraph->>SQLite: 12. 💾 Enregistre la décision définitive
-    LangGraph-->>Bot: 13. 📦 Émet l'objet AuditDecision final
-    Bot-->>Employe: 14. 🟢 Envoie le rapport de validation instantané
+    LangGraph->>LLM: 5. 🧩 Parse le texte vers le modèle de données
+    LLM-->>Domaine: 6. 📐 Valide le typage & montants (ReceiptExtraction)
+    Domaine-->>LangGraph: 7. 📊 Retourne l'objet typé et validé
+    LangGraph->>SIRENE: 8. 🔎 Vérifie l'existence légale de l'entreprise
+    SIRENE-->>LangGraph: 9. ✅ Confirme l'activité du commerçant
+    LangGraph->>SQLite: 10. 🔐 Vérifie l'empreinte SHA-256 (Anti-Doublons)
+    SQLite-->>LangGraph: 11. 🛡️ Confirme l'absence de collision
+    LangGraph->>Domaine: 12. ⚖️ Contrôle les règles de gestion (Plafond repas <= 45€, total TTC)
+    Domaine-->>LangGraph: 13. 🏷️ Attribue le statut final (APPROVED, FLAGGED, REJECTED)
+    LangGraph->>SQLite: 14. 💾 Enregistre la décision définitive en base
+    LangGraph-->>Bot: 15. 📦 Transmet l'objet AuditDecision
+    Bot-->>Employe: 16. 🟢 Affiche le rapport d'audit sur smartphone
 ```
 
 ---
