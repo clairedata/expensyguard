@@ -9,62 +9,76 @@
 
 ---
 
-## 🏛️ Architecture Hexagonale (Clean Architecture)
+## 🏛️ Architecture Hexagonale avec Rôles & Actions Verbeuses
 
-Le projet sépare strictement le cœur métier pur de tous les outils techniques et interfaces :
+Chaque couche a une responsabilité unique et précise, exprimée par des verbes d'action :
 
 ```mermaid
 flowchart TB
-    subgraph Interfaces["🚪 Interfaces (Entrées/Sorties)"]
-        TG["📱 Bot Telegram (Mobile)"]
-        API["🌐 FastAPI (API REST / Upload)"]
-        CLI["💻 Interface Ligne de Commande (CLI)"]
+    subgraph Interfaces["🚪 1. INTERFACES (Points d'Entrée & Sortie)"]
+        direction TB
+        TG["📱 Bot Telegram<br/><b>Action :</b> Réceptionne la photo mobile & répond"]
+        API["🌐 FastAPI REST<br/><b>Action :</b> Expose les endpoints HTTP & uploads"]
+        CLI["💻 Terminal CLI<br/><b>Action :</b> Exécute un test unitaire en console"]
     end
 
-    subgraph Application["⚙️ Application (Orchestrateur)"]
-        Graph["🧠 StateGraph LangGraph<br/>(state.py / nodes.py / graph.py)"]
+    subgraph Application["⚙️ 2. APPLICATION (Orchestrateur LangGraph)"]
+        direction TB
+        Graph["🧠 Machine d'États LangGraph<br/><b>Actions principales :</b><br/>• <i>Orchestre</i> le flux séquentiel des nœuds<br/>• <i>Transmet</i> la mémoire partagée (State)<br/>• <i>Applique</i> les seuils de dépenses (Plafond repas 45€)<br/>• <i>Arbitre</i> la décision finale (APPROVED / REJECTED)"]
     end
 
-    subgraph Domain["💎 Domaine Métier (Cœur Pur)"]
-        Models["📦 Models Pydantic V2<br/>(Receipt, Item, Tax, Status)"]
-        Ports["🔌 Interfaces Abstraites (Ports)<br/>(OCREngine, LLMExtractor, DB, SIRENE)"]
+    subgraph Domain["💎 3. DOMAINE MÉTIER (Cœur Pur & Invariable)"]
+        direction TB
+        Models["📦 Entités Pydantic V2<br/><b>Action :</b> <i>Définit</i> et <i>Valide</i> la structure des données pures"]
+        Ports["🔌 Interfaces Abstraites (Ports)<br/><b>Action :</b> <i>Impose</i> les contrats stricts aux outils externes"]
     end
 
-    subgraph Infrastructure["🛠️ Infrastructure (Adaptateurs Concrets)"]
-        OCR["👁️ OpenCV + EasyOCR"]
-        LLM["🤖 OpenAI / Google Gemini"]
-        REG["🏛️ API Recherche Entreprises (SIRENE)"]
-        DB["💾 SQLite (Empreintes SHA-256)"]
+    subgraph Infrastructure["🛠️ 4. INFRASTRUCTURE (Adaptateurs & Outils Techniques)"]
+        direction TB
+        OCR["👁️ OpenCV + EasyOCR<br/><b>Action :</b> <i>Prétraite</i> l'image et <i>Lit</i> les pixels de texte"]
+        LLM["🤖 OpenAI / Gemini<br/><b>Action :</b> <i>Transforme</i> le texte brut en données JSON typées"]
+        REG["🏛️ API SIRENE (Gouv)<br/><b>Action :</b> <i>Vérifie</i> l'existence légale de l'entreprise"]
+        DB["💾 SQLite Repository<br/><b>Action :</b> <i>Calcule</i> l'empreinte SHA-256 et <i>Bloque</i> les doublons"]
     end
 
-    Interfaces --> Application
-    Application --> Domain
-    Infrastructure -.->|Implémente| Ports
-    Application --> Infrastructure
+    %% Relations avec verbes d'action
+    Interfaces -->|📥 Transmet le fichier brut| Application
+    Application -->|📐 Utilise les règles & types| Domain
+    Infrastructure -.->|🤝 Respecte les contrats| Ports
+    Application -->|⚡ Déclenche les adaptateurs| Infrastructure
 ```
 
 ---
 
-## 🔄 Flux de Traitement d'un Reçu (Workflow)
+## 🔄 Flux Séquentiel d'un Reçu (Workflow d'Audit)
+
+Le parcours étape par étape avec les actions effectuées à chaque maillon de la chaîne :
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Employe as 📱 Employé (Telegram)
-    participant Bot as 🤖 Interface Bot
-    participant OCR as 👁️ OpenCV + EasyOCR
-    participant LLM as 🧠 IA (Extraction Structurée)
-    participant API as 🏛️ API Registre SIRENE
-    participant DB as 💾 SQLite (Anti-Doublons)
+    actor Employe as 📱 Employé (Mobile)
+    participant Bot as 🤖 Interface Telegram
+    participant LangGraph as ⚙️ Orchestrateur
+    participant OCR as 👁️ OpenCV / EasyOCR
+    participant LLM as 🧠 Moteur IA (LLM)
+    participant SIRENE as 🏛️ Registre Légal
+    participant SQLite as 💾 Base de Données
 
-    Employe->>Bot: Envoie la photo d'un ticket de caisse
-    Bot->>OCR: Prétraitement d'image & extraction de texte brut
-    OCR-->>LLM: Texte brut extrait
-    LLM-->>LLM: Structure les données (Date, Montant TTC/HT, TVA, Articles)
-    LLM->>API: Vérifie l'existence légale et l'activité du commerçant
-    API-->>DB: Calcule l'empreinte SHA-256 et vérifie les doublons
-    DB-->>Bot: Émet la décision finale (APPROVED / FLAGGED / REJECTED)
-    Bot-->>Employe: 🟢 Reçu validé et rapport détaillé instantané
+    Employe->>Bot: 1. 📤 Envoie la photo du ticket
+    Bot->>LangGraph: 2. 🚀 Initialise le flux avec l'image binaire
+    LangGraph->>OCR: 3. 🔍 Prétraite l'image & Extrait le texte brut
+    OCR-->>LangGraph: 4. 📄 Retourne le texte brut
+    LangGraph->>LLM: 5. 🧩 Parse & Structure en JSON (Montants, TVA, Date)
+    LLM-->>LangGraph: 6. 📊 Retourne l'objet ReceiptExtraction
+    LangGraph->>SIRENE: 7. 🔎 Vérifie le SIREN / Nom du commerçant
+    SIRENE-->>LangGraph: 8. ✅ Confirme l'activité légale de l'entreprise
+    LangGraph->>SQLite: 9. 🔐 Calcule l'empreinte SHA-256 & Détecte les doublons
+    SQLite-->>LangGraph: 10. 🛡️ Confirme l'absence de doublon
+    LangGraph->>LangGraph: 11. ⚖️ Évalue le respect du plafond (45€ repas)
+    LangGraph->>SQLite: 12. 💾 Enregistre la décision définitive
+    LangGraph-->>Bot: 13. 📦 Émet l'objet AuditDecision final
+    Bot-->>Employe: 14. 🟢 Envoie le rapport de validation instantané
 ```
 
 ---
