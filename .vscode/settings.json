@@ -1,0 +1,9 @@
+{
+    // Indique à l'analyseur de code (Pylance / Pyright) de chercher les modules dans la racine et dans src
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}",
+        "${workspaceFolder}/src"
+    ],
+    // Pointeur automatique vers l'interpréteur virtuel du projet
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe"
+}

@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Secrets & Environment variables (Protège vos clés API)
+.env
+
+# Bases de données locales & fichiers temporaires
+*.db
+*.sqlite3
+
+# Caches de tests
+.pytest_cache/
+.coverage
