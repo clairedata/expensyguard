@@ -9,7 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "easyocr>=1.7.2",
-    "fastapi>=0.142.2",
+    "fastapi[standard]>=0.142.2",
     "httpx>=0.28.1",
     "langgraph>=1.2.12",
     "openai>=3.24.0",
