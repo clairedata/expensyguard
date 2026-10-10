@@ -1,6 +1,6 @@
 # ==============================================================================
 # ADAPTATEUR LLM UNIVERSEL (src/infrastructure/llm_adapter.py)
-# Supporte nativement Google Gemini REST API (avec header x-goog-api-key)
+# Supporte OpenAI (Structured Outputs natifs), Google Gemini et Ollama
 # ==============================================================================
 
 # Importation du module JSON pour parser les réponses du modèle
@@ -34,9 +34,9 @@ class OpenAILLMExtractor(LLMExtractorPort):
         # Récupération de la clé API
         self.api_key = api_key or os.getenv("LLM_API_KEY", "dummy_key")
         # Récupération de l'URL de base
-        self.base_url = base_url or os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
+        self.base_url = base_url or os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
         # Récupération du nom du modèle d'inférence
-        self.model = model or os.getenv("LLM_MODEL", "gemini-1.5-flash")
+        self.model = model or os.getenv("LLM_MODEL", "gpt-4o-mini")
 
         # Détection si le fournisseur cible est Google Gemini
         self.is_gemini = "googleapis.com" in self.base_url or self.api_key.startswith("AQ.") or self.api_key.startswith("AIza")
@@ -121,25 +121,27 @@ class OpenAILLMExtractor(LLMExtractorPort):
 
     # Implémentation de la méthode d'extraction définie dans le port
     def extract_receipt(self, ocr_text: str) -> ReceiptExtraction:
-        # Définition du prompt d'expertise comptable
+        # Définition du prompt système contenant explicitement le mot-clé json et le schéma attendu
         system_prompt = (
             "Tu es un expert-comptable et auditeur financier automatisé de haut niveau.\n"
             "Analyse le texte brut OCR d'un reçu fiscal ou ticket de caisse.\n"
-            "Génère UNIQUEMENT un objet JSON valide avec cette structure exacte :\n"
+            "Tu dois impérativement répondre au format JSON valide selon cette structure exacte :\n"
             "{\n"
-            '  "merchant": {"name": "Nom du commerce", "siren_or_siret": null, "address": null},\n'
+            '  "merchant": {"name": "Nom du commerçant", "siren_or_siret": null, "address": null},\n'
             '  "date": "YYYY-MM-DD",\n'
+            '  "time": "HH:MM",\n'
             '  "total_amount_ttc": "12.50",\n'
             '  "total_amount_ht": null,\n'
             '  "currency": "EUR",\n'
             '  "category": "MEAL",\n'
-            '  "taxes": [],\n'
-            '  "items": [{"label": "Article", "quantity": "1", "total_price": "12.50"}]\n'
+            '  "taxes": [{"rate": "20.0", "tax_amount": "2.08"}],\n'
+            '  "items": [{"label": "Nom article", "quantity": "1", "total_price": "12.50"}]\n'
             "}\n"
             "Règles strictes :\n"
-            "- Le format de date doit être 'YYYY-MM-DD' (ex: 2026-10-05).\n"
-            "- Le champ 'category' doit être l'une des valeurs : MEAL, TRANSPORT, HOTEL, SUPPLIES, OTHER.\n"
-            "- Les montants doivent être des chaînes numériques décimales (ex: '15.50')."
+            "- Réponds UNIQUEMENT un objet JSON pur sans balises Markdown.\n"
+            "- La date doit être au format ISO 'YYYY-MM-DD'. Si l'année manque, utilise 2026.\n"
+            "- La catégorie doit être MEAL, TRANSPORT, HOTEL, SUPPLIES, ou OTHER.\n"
+            "- Les montants doivent être des chaînes numériques décimales (ex: '25.00')."
         )
 
         # Branche 1 : Exécution via Google Gemini API native
@@ -147,13 +149,13 @@ class OpenAILLMExtractor(LLMExtractorPort):
             # Appel du service Gemini natif
             return self._call_gemini_native(system_prompt, ocr_text)
 
-        # Branche 2 : Exécution via OpenAI / Ollama standard
+        # Branche 2 : Exécution via OpenAI officiel
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Texte brut OCR :\n\n{ocr_text}"},
+            {"role": "user", "content": f"Voici le texte brut OCR du ticket à extraire en JSON :\n\n{ocr_text}"},
         ]
 
-        # Appel avec retour forcé en JSON
+        # Appel avec retour forcé au format JSON Object (exige le mot json dans le prompt)
         completion = self.openai_client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -161,7 +163,7 @@ class OpenAILLMExtractor(LLMExtractorPort):
             temperature=0.0,
         )
 
-        # Récupération du JSON généré
+        # Récupération du texte JSON brut
         raw_content = completion.choices[0].message.content
-        # Validation et conversion en objet de domaine
+        # Validation et conversion en objet de domaine typé
         return ReceiptExtraction.model_validate_json(raw_content)

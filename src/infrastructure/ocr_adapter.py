@@ -18,12 +18,22 @@ from ..domain.ports import OCREnginePort
 
 # Implémentation concrète de l'OCR utilisant EasyOCR et OpenCV
 class EasyOCREngine(OCREnginePort):
-    # Constructeur initialisant le lecteur EasyOCR
+    # Constructeur initialisant la configuration des langues
     def __init__(self, languages: list[str] = None):
         # Définition des langues par défaut (français et anglais pour les reçus)
-        selected_langs = languages if languages is not None else ["fr", "en"]
-        # Instanciation du lecteur EasyOCR sans téléchargement bloquant inutile
-        self.reader = easyocr.Reader(selected_langs, gpu=False)
+        self.selected_langs = languages if languages is not None else ["fr", "en"]
+        # Lecteur initialisé à None pour chargement paresseux ultra-rapide au premier besoin
+        self._reader = None
+
+    # Propriété avec chargement à la demande (Lazy Loading) pour éviter de bloquer le démarrage du serveur
+    @property
+    def reader(self) -> easyocr.Reader:
+        # Si le modèle n'a pas encore été chargé en mémoire
+        if self._reader is None:
+            # Instanciation effective du modèle OCR
+            self._reader = easyocr.Reader(self.selected_langs, gpu=False)
+        # Renvoi de l'instance du lecteur
+        return self._reader
 
     # Méthode interne de prétraitement d'image pour maximiser la lisibilité OCR
     def _preprocess_image(self, image_bytes: bytes) -> np.ndarray:

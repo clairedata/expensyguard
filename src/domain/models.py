@@ -10,10 +10,10 @@ from decimal import Decimal
 from enum import Enum
 
 # Importation des types optionnels et listes pour les annotations de type
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 # Importation des briques de base de validation Pydantic V2
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # Définition de l'énumération représentant les statuts finaux d'audit
@@ -54,24 +54,54 @@ class MerchantInfo(BaseModel):
 
 # Modèle détaillant la ventilation de la Taxe sur la Valeur Ajoutée (TVA)
 class TaxDetail(BaseModel):
-    # Taux de TVA appliqué en pourcentage (ex: 20.0, 10.0, 5.5)
-    rate: Decimal = Field(description="Taux de TVA en pourcentage")
+    # Taux de TVA appliqué en pourcentage (ex: 20.0, 10.0, 5.5, ou None si non précisé)
+    rate: Optional[Decimal] = Field(default=None, description="Taux de TVA en pourcentage")
     # Montant net hors taxe sur lequel s'applique ce taux
     net_amount: Optional[Decimal] = Field(default=None, description="Base hors taxe soumise à ce taux")
     # Montant calculé de la taxe
-    tax_amount: Decimal = Field(description="Montant de la TVA correspondante")
+    tax_amount: Optional[Decimal] = Field(default=None, description="Montant de la TVA correspondante")
+
+    # Validateur pré-traitement pour tolérer les alias comme 'amount' renvoyés par l'IA
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_tax_fields(cls, data: Any) -> Any:
+        # Si la donnée reçue est un dictionnaire
+        if isinstance(data, dict):
+            # Si le champ 'tax_amount' est absent mais 'amount' est présent
+            if "tax_amount" not in data and "amount" in data:
+                # Assigner 'amount' à 'tax_amount'
+                data["tax_amount"] = data["amount"]
+            # Si le champ 'rate' est manquant ou vide
+            if "rate" not in data or data["rate"] is None:
+                # On tolère None par défaut
+                data["rate"] = None
+        # Renvoi de la donnée normalisée
+        return data
 
 
 # Modèle représentant une ligne individuelle d'article sur le ticket de caisse
 class ReceiptItem(BaseModel):
     # Libellé ou désignation de l'article acheté
-    label: str = Field(description="Désignation de l'article")
+    label: str = Field(default="Article", description="Désignation de l'article")
     # Quantité achetée (par défaut 1)
     quantity: Decimal = Field(default=Decimal("1.0"), description="Quantité d'articles achetés")
     # Prix unitaire de l'article
     unit_price: Optional[Decimal] = Field(default=None, description="Prix unitaire de l'article")
     # Prix total pour la ligne (quantité x prix unitaire)
-    total_price: Decimal = Field(description="Montant total de la ligne")
+    total_price: Optional[Decimal] = Field(default=None, description="Montant total de la ligne")
+
+    # Validateur pré-traitement pour tolérer 'price' ou 'amount'
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_item_fields(cls, data: Any) -> Any:
+        # Si la donnée reçue est un dictionnaire
+        if isinstance(data, dict):
+            # Si total_price est absent mais price est présent
+            if "total_price" not in data and "price" in data:
+                # Mapper price vers total_price
+                data["total_price"] = data["price"]
+        # Renvoi de la donnée normalisée
+        return data
 
 
 # Modèle représentant la structure complète des données extraites du reçu

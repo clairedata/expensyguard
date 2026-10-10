@@ -250,7 +250,7 @@ def business_rules_and_decision_node(
     # Initialisation de la liste des justifications
     reasons = []
 
-    # Cas 1 : Absence totale de données extraites (échec amont)
+    # Cas 1 : Absence totale de données extraites (échec amont ou image illisible)
     if not extracted:
         # Construction d'une décision de rejet
         decision = AuditDecision(
@@ -260,6 +260,15 @@ def business_rules_and_decision_node(
             anomalies=anomalies,
             confidence_score=0.0,
             extracted_data=None,
+        )
+        # Génération d'une empreinte dédiée pour l'enregistrement d'échec
+        fingerprint = f"unextracted_{receipt_id}"
+        # Sauvegarde en base de données pour visibilité sur le Dashboard
+        repo.save_audit(
+            receipt_id=receipt_id,
+            fingerprint=fingerprint,
+            extraction=None,
+            decision=decision,
         )
         # Renvoi de la décision
         return {"decision": decision}
@@ -277,7 +286,14 @@ def business_rules_and_decision_node(
             confidence_score=0.98,
             extracted_data=extracted,
         )
-        # Renvoi de la décision sans écraser le doublon existant
+        # Sauvegarde de la tentative de doublon avec suffixe pour ne pas écraser l'original
+        repo.save_audit(
+            receipt_id=receipt_id,
+            fingerprint=f"dup_{receipt_id}_{dup_check.fingerprint[:12]}",
+            extraction=extracted,
+            decision=decision,
+        )
+        # Renvoi de la décision
         return {"decision": decision}
 
     # Application de la règle métier : Plafond des frais de repas

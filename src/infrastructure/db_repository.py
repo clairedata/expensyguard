@@ -1,6 +1,6 @@
 # ==============================================================================
 # ADAPTATEUR BASE DE DONNÉES SQLITE (src/infrastructure/db_repository.py)
-# Gestion de la persistance locale et détection d'empreinte unique SHA-256
+# Gestion de la persistance locale, détection d'empreinte SHA-256 et requêtes API
 # ==============================================================================
 
 # Importation du module de gestion de contexte pour fermer proprement les connexions
@@ -9,7 +9,7 @@ from contextlib import contextmanager
 # Importation du module standard de hachage cryptographique
 import hashlib
 
-# Importation du module JSON pour sérialiser les données d'audit
+# Importation du module JSON pour sérialiser et désérialiser les données d'audit
 import json
 
 # Importation du module standard de base de données SQLite
@@ -18,8 +18,11 @@ import sqlite3
 # Importation du module de calcul financier Decimal
 from decimal import Decimal
 
+# Importation du module pathlib pour les chemins absolus
+from pathlib import Path
+
 # Importation des types pour annoter le code
-from typing import Generator, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 # Importation relative des modèles de domaine
 from ..domain.models import (
@@ -35,19 +38,26 @@ from ..domain.ports import ReceiptRepositoryPort
 # Implémentation du référentiel de stockage SQLite
 class SQLiteReceiptRepository(ReceiptRepositoryPort):
     # Constructeur initialisant le chemin de la base et créant les tables
-    def __init__(self, db_path: str = "expensyguard.db"):
-        # Stockage du chemin de la base de données (fichier ou :memory:)
-        self.db_path = db_path
-        # Indicateur booléen vérifiant si la base est volatile en mémoire RAM
-        self._is_memory = db_path == ":memory:"
-        # Si la base est en mémoire, on maintient une connexion unique persistante
-        if self._is_memory:
-            # Création de la connexion unique persistante pour la RAM
+    def __init__(self, db_path: Optional[str] = None):
+        # Cas base de données volatile en mémoire RAM (utilisé uniquement en tests)
+        if db_path == ":memory:":
+            # Affectation du mot-clé :memory:
+            self.db_path = ":memory:"
+            # Indicateur de mémoire RAM
+            self._is_memory = True
+            # Connexion unique persistante pour la RAM
             self._persistent_conn = sqlite3.connect(":memory:", check_same_thread=False)
-            # Permet d'accéder aux colonnes SQL par leurs noms
+            # Row factory pour accès par clé
             self._persistent_conn.row_factory = sqlite3.Row
+        # Cas base de données persistante sur le disque dur (Production standard)
         else:
-            # Pas de connexion persistante nécessaire pour les fichiers sur disque
+            # Calcul du chemin absolu basé sur la racine du projet
+            project_root = Path(__file__).resolve().parent.parent.parent
+            # Chemin absolu vers le fichier physique expensyguard.db
+            self.db_path = db_path if db_path else str(project_root / "expensyguard.db")
+            # Base physique sur disque
+            self._is_memory = False
+            # Pas de connexion persistante unique nécessaire
             self._persistent_conn = None
         # Initialisation du schéma relationnel de la base
         self._init_db()
@@ -188,3 +198,99 @@ class SQLiteReceiptRepository(ReceiptRepositoryPort):
                     audit_json,
                 ),
             )
+
+    # Récupérer la liste complète des reçus pour le tableau de bord Frontend
+    def list_receipts(self, limit: int = 100) -> List[Dict[str, Any]]:
+        # Connexion à la base de données
+        with self._get_connection() as conn:
+            # Sélection des reçus ordonnés du plus récent au plus ancien
+            cursor = conn.execute(
+                "SELECT * FROM receipts ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+            # Récupération des lignes
+            rows = cursor.fetchall()
+            # Transformation en liste de dictionnaires avec désérialisation JSON
+            results = []
+            # Parcours des lignes retournées
+            for row in rows:
+                # Décodage de l'objet audit_json
+                audit_data = json.loads(row["audit_json"]) if row["audit_json"] else {}
+                # Décodage de l'objet extracted_json
+                extracted_data = json.loads(row["extracted_json"]) if row["extracted_json"] else None
+                # Construction de la fiche structurée pour le front
+                results.append({
+                    "id": row["id"],
+                    "fingerprint": row["fingerprint"],
+                    "merchant_name": row["merchant_name"],
+                    "receipt_date": row["receipt_date"],
+                    "total_amount_ttc": row["total_amount_ttc"],
+                    "status": row["status"],
+                    "confidence_score": row["confidence_score"],
+                    "created_at": row["created_at"],
+                    "audit": audit_data,
+                    "extracted": extracted_data,
+                })
+            # Renvoi des résultats
+            return results
+
+    # Récupérer les statistiques globales pour les cartes KPI du Frontend
+    def get_statistics(self) -> Dict[str, Any]:
+        # Connexion à la base
+        with self._get_connection() as conn:
+            # Requête d'agrégation globale
+            cursor = conn.execute(
+                """
+                SELECT 
+                    COUNT(*) as total_count,
+                    SUM(CAST(total_amount_ttc AS REAL)) as total_sum,
+                    SUM(CASE WHEN status = 'APPROVED' THEN 1 ELSE 0 END) as approved_count,
+                    SUM(CASE WHEN status = 'FLAGGED_FOR_REVIEW' THEN 1 ELSE 0 END) as review_count,
+                    SUM(CASE WHEN status = 'REJECTED' THEN 1 ELSE 0 END) as rejected_count
+                FROM receipts
+                """
+            )
+            # Récupération de la ligne d'agrégation
+            row = cursor.fetchone()
+            # Construction des statistiques consolidées
+            total_count = row["total_count"] or 0
+            total_sum = round(row["total_sum"] or 0.0, 2)
+            approved = row["approved_count"] or 0
+            review = row["review_count"] or 0
+            rejected = row["rejected_count"] or 0
+            # Calcul du taux de conformité automatique en pourcentage
+            compliance_rate = round((approved / total_count * 100), 1) if total_count > 0 else 100.0
+
+            # Renvoi du dictionnaire de métriques pour le Dashboard
+            return {
+                "total_receipts": total_count,
+                "total_spent_eur": total_sum,
+                "approved_count": approved,
+                "review_count": review,
+                "rejected_count": rejected,
+                "compliance_rate": compliance_rate,
+            }
+
+    # Mise à jour manuelle du statut d'un reçu par le comptable
+    def update_receipt_status(self, receipt_id: str, new_status: str, note: Optional[str] = None) -> bool:
+        # Connexion à la base
+        with self._get_connection() as conn:
+            # Récupération de l'audit existant
+            cursor = conn.execute("SELECT audit_json FROM receipts WHERE id = ?", (receipt_id,))
+            row = cursor.fetchone()
+            # Si le reçu n'existe pas
+            if not row:
+                return False
+            # Désérialisation de l'audit
+            audit_dict = json.loads(row["audit_json"])
+            # Mise à jour du statut
+            audit_dict["status"] = new_status
+            # Ajout de la note de révision si renseignée
+            if note:
+                audit_dict.setdefault("reasons", []).append(f"Validation manuelle : {note}")
+            # Ré-enregistrement en base
+            conn.execute(
+                "UPDATE receipts SET status = ?, audit_json = ? WHERE id = ?",
+                (new_status, json.dumps(audit_dict), receipt_id),
+            )
+            return True

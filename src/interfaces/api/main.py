@@ -1,6 +1,6 @@
 # ==============================================================================
 # APPLICATION FASTAPI (src/interfaces/api/main.py)
-# API REST exposant le service d'audit de reçus via upload de fichier
+# API REST exposant le service d'audit et les données pour le Dashboard React
 # ==============================================================================
 
 # Importation du module standard de gestion des variables d'environnement
@@ -12,11 +12,14 @@ import uuid
 # Importation du module de calcul décimal
 from decimal import Decimal
 
-# Importation des briques FastAPI
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+# Importation des types
+from typing import Any, Dict, List, Optional
 
-# Importation de la réponse JSON standardisée
+# Importation des briques FastAPI et du middleware CORS
+from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 # Importation relative du constructeur de graphe LangGraph
 from ...application.graph import build_audit_graph
@@ -34,8 +37,17 @@ from ...infrastructure.registry_api import SireneRegistryAPI
 # Initialisation de l'application FastAPI avec métadonnées professionnelles
 app = FastAPI(
     title="ExpensyGuard API",
-    description="Système d'audit automatisé de notes de frais et reçus en Clean Architecture",
+    description="API REST d'audit automatisé de reçus fiscaux et de gestion des notes de frais",
     version="0.1.0",
+)
+
+# Configuration du middleware CORS pour autoriser le frontend React
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Instanciation globale des adaptateurs (Singletons pour injection)
@@ -57,11 +69,53 @@ audit_graph = build_audit_graph(
 )
 
 
+# Modèle de requête pour la mise à jour de statut par le gestionnaire
+class UpdateStatusRequest(BaseModel):
+    # Nouveau statut souhaité (APPROVED, REJECTED, FLAGGED_FOR_REVIEW)
+    status: str
+    # Note ou justification optionnelle du réviseur
+    note: Optional[str] = None
+
+
+# Route racine d'accueil (Root)
+@app.get("/", tags=["Monitoring"], summary="Accueil de l'API")
+def root_endpoint() -> dict:
+    # Message de bienvenue et lien vers la documentation
+    return {"message": "ExpensyGuard API en ligne", "docs": "/docs", "status": "healthy"}
+
+
 # Route de vérification de l'état de santé du service (Healthcheck)
 @app.get("/health", tags=["Monitoring"], summary="Vérifier la disponibilité de l'API")
-async def health_check() -> dict:
-    # Renvoi d'un indicateur de statut opérationnel
+def health_check() -> dict:
+    # Renvoi d'un indicateur de statut opérationnel immédiat
     return {"status": "healthy", "service": "expensyguard"}
+
+
+# Route pour récupérer les statistiques globales (Cartes KPI du Frontend)
+@app.get("/api/v1/stats", tags=["Dashboard"], summary="Obtenir les métriques globales")
+def get_stats_endpoint() -> Dict[str, Any]:
+    # Lecture des statistiques consolidées depuis SQLite dans le threadpool
+    return db_adapter.get_statistics()
+
+
+# Route pour lister tous les reçus enregistrés (Tableau de bord)
+@app.get("/api/v1/receipts", tags=["Dashboard"], summary="Lister les reçus audités")
+def list_receipts_endpoint(limit: int = 100) -> List[Dict[str, Any]]:
+    # Récupération de l'historique des reçus
+    return db_adapter.list_receipts(limit=limit)
+
+
+# Route de mise à jour manuelle de statut (Action du comptable sur le Frontend)
+@app.patch("/api/v1/receipts/{receipt_id}/status", tags=["Dashboard"], summary="Modifier le statut d'un reçu")
+def update_status_endpoint(receipt_id: str, request: UpdateStatusRequest) -> dict:
+    # Mise à jour dans la base SQLite
+    success = db_adapter.update_receipt_status(receipt_id, request.status, request.note)
+    # Si le reçu n'a pas été trouvé
+    if not success:
+        # Erreur 404
+        raise HTTPException(status_code=404, detail="Reçu introuvable.")
+    # Confirmation de succès
+    return {"success": True, "receipt_id": receipt_id, "new_status": request.status}
 
 
 # Route principale d'upload et d'audit de reçu
