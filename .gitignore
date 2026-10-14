@@ -26,3 +26,7 @@ frontend/node_modules/
 frontend/dist/
 .env.local
 .env.*.local
+
+# Images stockées des reçus
+data_images/*
+!data_images/.gitkeep

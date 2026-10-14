@@ -220,15 +220,30 @@ class TelegramReceiptBot:
             # Fin de traitement
             return
 
-        # Vérification si le message contient une photo
+        # Vérification si le message contient une photo ou un fichier image/document
         photos = message.get("photo")
-        # Si aucune photo n'est présente
-        if not photos:
-            # Rappel à l'utilisateur
+        document = message.get("document")
+
+        file_id = None
+        file_ext = ".jpg"
+
+        if photos:
+            # Récupération de la photo avec la plus haute résolution (dernière de la liste)
+            best_photo = photos[-1]
+            file_id = best_photo["file_id"]
+            file_ext = ".jpg"
+        elif document and (document.get("mime_type", "").startswith("image/") or document.get("mime_type") == "application/pdf"):
+            # Fichier image ou PDF envoyé en tant que document brut
+            file_id = document["file_id"]
+            doc_name = document.get("file_name", "")
+            _, ext = os.path.splitext(doc_name)
+            file_ext = ext if ext else ".jpg"
+        else:
+            # Rappel à l'utilisateur si aucun fichier valide
             await self.send_message(
                 client,
                 chat_id,
-                "ℹ️ Veuillez m'envoyer une <b>photo claire</b> de votre ticket de caisse.",
+                "ℹ️ Veuillez m'envoyer une <b>photo ou un fichier image clair</b> de votre ticket de caisse.",
             )
             # Fin de traitement
             return
@@ -240,23 +255,28 @@ class TelegramReceiptBot:
             "⏳ <i>Analyse et audit en cours (OCR + IA + Registre officiel)...</i>",
         )
 
-        # Récupération de la photo avec la plus haute résolution (dernière de la liste)
-        best_photo = photos[-1]
-        # Identifiant du fichier Telegram
-        file_id = best_photo["file_id"]
-
         # Bloc sécurisé d'exécution de l'audit
         try:
-            # Téléchargement des octets de l'image
+            # Téléchargement direct des octets bruts depuis les serveurs Telegram
             image_bytes = await self.download_photo(client, file_id)
             # Création d'un identifiant unique de reçu
             receipt_id = f"tg_{uuid.uuid4().hex[:8]}"
+            image_filename = f"{receipt_id}{file_ext}"
+
+            # Sauvegarde physique brute dans data_images/
+            data_images_dir = Path(__file__).resolve().parent.parent.parent / "data_images"
+            data_images_dir.mkdir(parents=True, exist_ok=True)
+            saved_path = data_images_dir / image_filename
+            with open(saved_path, "wb") as f_out:
+                f_out.write(image_bytes)
+
+            print(f"[INFO] Image brute enregistrée : {saved_path} ({len(image_bytes)} octets)")
 
             # Préparation de l'état initial pour LangGraph
             state = {
                 "receipt_id": receipt_id,
                 "image_bytes": image_bytes,
-                "file_name": f"{receipt_id}.jpg",
+                "file_name": image_filename,
                 "anomalies": [],
             }
 

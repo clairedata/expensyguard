@@ -1,10 +1,10 @@
 // ==============================================================================
 // APPLICATION REACT PRINCIPALE (frontend/src/App.jsx)
-// Dashboard interactif avec navigation par onglets dédiés et liaison API
+// Dashboard d'audit avec authentification JWT (Admin / User), gestion des employés
+// et modale de fiche collaborateur avec filtres temporels (Jour / Mois / Année)
 // ==============================================================================
 
-// Importation de React et des hooks d'état et d'effets
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 
 // Importation des icônes professionnelles depuis lucide-react
 import {
@@ -25,21 +25,121 @@ import {
   LayoutDashboard,
   Sparkles,
   ArrowRight,
-  Receipt
+  Receipt,
+  Eye,
+  Image as ImageIcon,
+  Trash2,
+  User,
+  Users,
+  LogOut,
+  LogIn,
+  KeyRound,
+  Filter,
+  Clock,
+  Briefcase,
+  Mail,
+  Crown,
+  Shield,
+  Lock
 } from 'lucide-react';
 
-// URL de base de l'API (utilise le proxy Vite configuré vers http://127.0.0.1:8000)
 const API_BASE_URL = '';
 
-// Composant racine de l'application
 export default function App() {
-  // Onglet actif : 'DASHBOARD' ou 'AUDIT'
+  // Navigation active : 'DASHBOARD' ou 'AUDIT'
   const [activeTab, setActiveTab] = useState('DASHBOARD');
 
-  // Liste des reçus récupérés depuis l'API
-  const [receipts, setReceipts] = useState([]);
+  // ==========================================================================
+  // 1. ÉTAT D'AUTHENTIFICATION JWT (ADMIN / USER)
+  // ==========================================================================
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem('expensyguard_auth');
+      return saved ? JSON.parse(saved) : {
+        token: '',
+        username: 'admin',
+        role: 'admin',
+        name: 'Alexandre Dupont (Admin)',
+        email: 'admin@expensyguard.com'
+      };
+    } catch {
+      return null;
+    }
+  });
 
-  // Métriques consolidées pour les cartes KPI
+  const [loginModalOpen, setLoginModalOpen] = useState(false);
+  const [loginForm, setLoginForm] = useState({ username: 'admin', password: 'admin123' });
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState(null);
+
+  // Helper pour injecter les headers d'autorisation JWT
+  const authHeaders = useMemo(() => {
+    return currentUser?.token ? { 'Authorization': `Bearer ${currentUser.token}` } : {};
+  }, [currentUser]);
+
+  // Sauvegarde persistante de la session
+  useEffect(() => {
+    if (currentUser) {
+      localStorage.setItem('expensyguard_auth', JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem('expensyguard_auth');
+    }
+  }, [currentUser]);
+
+  // Initialisation automatique du token admin si non connecté
+  useEffect(() => {
+    if (!currentUser?.token) {
+      handleLogin({ username: 'admin', password: 'admin123' });
+    }
+  }, []);
+
+  // Gestionnaire de connexion
+  const handleLogin = async (overrideUser = null) => {
+    setLoginLoading(true);
+    setLoginError(null);
+    const creds = overrideUser || loginForm;
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(creds),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setCurrentUser({
+          token: data.access_token,
+          username: data.user.username,
+          role: data.user.role,
+          name: data.user.name,
+          email: data.user.email,
+        });
+        setLoginModalOpen(false);
+      } else {
+        const err = await res.json().catch(() => ({ detail: "Identifiants invalides" }));
+        setLoginError(err.detail || "Échec de connexion.");
+      }
+    } catch (e) {
+      setLoginError("Impossible de joindre le serveur FastAPI.");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  // Déconnexion
+  const handleLogout = () => {
+    setCurrentUser(null);
+    setLoginModalOpen(true);
+  };
+
+  // ==========================================================================
+  // 2. DONNÉES MÉTIERS (REÇUS, KPIS, EMPLOYÉS)
+  // ==========================================================================
+  const [receipts, setReceipts] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [selectedEmployeeForAudit, setSelectedEmployeeForAudit] = useState('EMP001');
+
   const [stats, setStats] = useState({
     total_receipts: 0,
     total_spent_eur: 0,
@@ -49,168 +149,211 @@ export default function App() {
     compliance_rate: 100,
   });
 
-  // État de chargement réseau
   const [loading, setLoading] = useState(false);
-
-  // Filtre de statut actif pour le tableau
   const [filterStatus, setFilterStatus] = useState('ALL');
-
-  // Chaîne de recherche pour filtrer commerçants et montants
   const [searchTerm, setSearchTerm] = useState('');
 
-  // Reçu sélectionné pour affichage dans la modale d'inspection
+  // Modales
   const [selectedReceipt, setSelectedReceipt] = useState(null);
+  const [imageModalReceipt, setImageModalReceipt] = useState(null);
+  const [deleteConfirmReceipt, setDeleteConfirmReceipt] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
-  // Fichier sélectionné dans l'onglet d'audit
+  // Fiche employé et filtres temporels
+  const [employeeSheetModal, setEmployeeSheetModal] = useState(null);
+  const [employeeSheetLoading, setEmployeeSheetLoading] = useState(false);
+  const [employeePeriodType, setEmployeePeriodType] = useState('ALL'); // 'ALL', 'YEAR', 'MONTH', 'DAY'
+  const [employeeDateValue, setEmployeeDateValue] = useState('');
+
+  // Espace audit
   const [auditFile, setAuditFile] = useState(null);
-
-  // URL de prévisualisation locale de l'image
   const [previewUrl, setPreviewUrl] = useState(null);
-
-  // État de progression de l'audit en cours
   const [isAuditing, setIsAuditing] = useState(false);
-
-  // Résultat direct du dernier audit réalisé
   const [latestAuditResult, setLatestAuditResult] = useState(null);
-
-  // Message d'erreur éventuel lors de l'audit
   const [auditError, setAuditError] = useState(null);
 
-  // Fonction asynchrone de récupération des données depuis FastAPI
+  // Récupération des données globales
   const fetchData = async () => {
-    // Activation de l'indicateur de chargement
     setLoading(true);
-
     try {
-      // 1. Récupération des statistiques consolidées
-      console.log(`[Frontend] Envoi de la requête vers : ${API_BASE_URL}/api/v1/stats`);
+      // 1. Stats
       const statsRes = await fetch(`${API_BASE_URL}/api/v1/stats`);
-      console.log(`[Frontend] Statut HTTP stats :`, statsRes.status);
       if (statsRes.ok) {
         const statsData = await statsRes.json();
-        console.log("[Frontend] Données stats reçues avec succès :", statsData);
         setStats(statsData);
-      } else {
-        console.warn("[Frontend] Échec de la réponse stats :", statsRes.status);
       }
 
-      // 2. Récupération de la liste historique des reçus
-      console.log(`[Frontend] Envoi de la requête vers : ${API_BASE_URL}/api/v1/receipts`);
+      // 2. Reçus
       const receiptsRes = await fetch(`${API_BASE_URL}/api/v1/receipts`);
-      console.log(`[Frontend] Statut HTTP receipts :`, receiptsRes.status);
       if (receiptsRes.ok) {
         const receiptsData = await receiptsRes.json();
-        console.log("[Frontend] Liste des reçus reçue :", receiptsData);
         setReceipts(receiptsData);
-      } else {
-        console.warn("[Frontend] Échec de la réponse receipts :", receiptsRes.status);
+      }
+
+      // 3. Employés
+      const empRes = await fetch(`${API_BASE_URL}/api/v1/employees`);
+      if (empRes.ok) {
+        const empData = await empRes.json();
+        setEmployees(empData);
       }
     } catch (err) {
-      // Journalisation explicite si le serveur est éteint
-      console.error("[Frontend] Erreur réseau (le serveur FastAPI est-il bien allumé sur le port 8000 ?) :", err);
+      console.error("[Frontend] Erreur réseau :", err);
     } finally {
-      // Désactivation de l'indicateur de chargement
       setLoading(false);
     }
   };
 
-  // Chargement automatique des données au montage du composant
   useEffect(() => {
     fetchData();
   }, []);
 
-  // Gestionnaire de sélection de fichier dans l'onglet d'audit dédié
+  // ==========================================================================
+  // 3. ACTIONS EMPLOYÉS & FILTRES DE FICHE
+  // ==========================================================================
+  const openEmployeeSheet = async (employeeId, periodType = 'ALL', dateVal = '') => {
+    setEmployeeSheetLoading(true);
+    setEmployeePeriodType(periodType);
+    setEmployeeDateValue(dateVal);
+
+    try {
+      let url = `${API_BASE_URL}/api/v1/employees/${employeeId}?period_type=${periodType}`;
+      if (dateVal) {
+        url += `&date_value=${encodeURIComponent(dateVal)}`;
+      }
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        setEmployeeSheetModal(data);
+      }
+    } catch (e) {
+      console.error("Erreur fiche employé :", e);
+    } finally {
+      setEmployeeSheetLoading(false);
+    }
+  };
+
+  const handlePeriodChange = (newPeriodType, newDateValue = '') => {
+    if (!employeeSheetModal?.employee?.id) return;
+    openEmployeeSheet(employeeSheetModal.employee.id, newPeriodType, newDateValue);
+  };
+
+  // ==========================================================================
+  // 4. SUPPRESSION D'UN REÇU (ACTION ADMIN)
+  // ==========================================================================
+  const handleDeleteReceipt = async (receiptId) => {
+    if (!currentUser || currentUser.role !== 'admin') {
+      alert("Action refusée : Seul un administrateur peut supprimer un ticket.");
+      return;
+    }
+
+    setIsDeleting(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/receipts/${receiptId}`, {
+        method: 'DELETE',
+        headers: {
+          ...authHeaders,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (res.ok) {
+        setDeleteConfirmReceipt(null);
+        setSelectedReceipt(null);
+        setImageModalReceipt(null);
+        await fetchData();
+        // Si la fiche employé est ouverte, la rafraîchir
+        if (employeeSheetModal?.employee?.id) {
+          openEmployeeSheet(employeeSheetModal.employee.id, employeePeriodType, employeeDateValue);
+        }
+      } else {
+        const err = await res.json().catch(() => ({ detail: "Échec de suppression" }));
+        alert(`Erreur : ${err.detail}`);
+      }
+    } catch (err) {
+      alert("Erreur de communication lors de la suppression.");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Mise à jour de statut (Validation / Rejet)
+  const handleUpdateStatus = async (receiptId, newStatus) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/receipts/${receiptId}/status`, {
+        method: 'PATCH',
+        headers: {
+          ...authHeaders,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: newStatus, note: `Décision de ${currentUser?.name || 'Gestionnaire'}` }),
+      });
+
+      if (res.ok) {
+        setSelectedReceipt(null);
+        await fetchData();
+        if (employeeSheetModal?.employee?.id) {
+          openEmployeeSheet(employeeSheetModal.employee.id, employeePeriodType, employeeDateValue);
+        }
+      }
+    } catch (err) {
+      console.error("Erreur de statut:", err);
+    }
+  };
+
+  // Téléversement & Audit
   const handleFileSelect = (event) => {
-    // Récupération du fichier choisi
     const file = event.target.files?.[0];
     if (file) {
-      // Stockage de l'objet fichier
       setAuditFile(file);
-      // Réinitialisation des erreurs et résultats précédents
       setAuditError(null);
       setLatestAuditResult(null);
-      // Création d'une URL de prévisualisation dans le DOM
       setPreviewUrl(URL.createObjectURL(file));
     }
   };
 
-  // Gestionnaire d'exécution de l'audit complet via l'API
   const handleRunAudit = async () => {
-    // Vérification de la présence d'un fichier
     if (!auditFile) return;
 
-    // Préparation des données binaires multipart/form-data
     const formData = new FormData();
     formData.append('file', auditFile);
+    formData.append('employee_id', selectedEmployeeForAudit);
 
-    // Démarrage de l'état d'audit
     setIsAuditing(true);
     setAuditError(null);
 
     try {
-      // Appel POST vers la route d'audit de FastAPI
       const response = await fetch(`${API_BASE_URL}/api/v1/audit`, {
         method: 'POST',
+        headers: authHeaders,
         body: formData,
       });
 
-      // Si le backend renvoie un statut 200 OK
       if (response.ok) {
-        // Extraction de la décision d'audit retournée
         const resultData = await response.json();
-        // Enregistrement dans l'état local pour affichage
         setLatestAuditResult(resultData);
-        // Actualisation automatique de la liste globale et des KPI
         await fetchData();
       } else {
-        // Lecture du message d'erreur retourné par l'API
         const errData = await response.json().catch(() => ({ detail: "Erreur serveur" }));
         setAuditError(errData.detail || "Échec du traitement du reçu.");
       }
     } catch (err) {
-      // Capture d'erreur réseau
-      console.error("Erreur d'audit:", err);
-      setAuditError("Impossible de joindre le serveur d'audit FastAPI (vérifiez qu'il tourne sur le port 8000).");
+      setAuditError("Impossible de joindre le serveur FastAPI.");
     } finally {
-      // Arrêt du loader d'audit
       setIsAuditing(false);
     }
   };
 
-  // Gestionnaire de mise à jour manuelle du statut d'un reçu (Approve / Reject)
-  const handleUpdateStatus = async (receiptId, newStatus) => {
-    try {
-      // Requête PATCH vers l'API
-      const res = await fetch(`${API_BASE_URL}/api/v1/receipts/${receiptId}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus, note: "Décision manuelle du gestionnaire" }),
-      });
-
-      if (res.ok) {
-        // Fermeture de la modale d'inspection
-        setSelectedReceipt(null);
-        // Rechargement des données fraîches
-        await fetchData();
-      }
-    } catch (err) {
-      console.error("Erreur de mise à jour du statut:", err);
-    }
-  };
-
-  // Filtrage combiné des reçus (statut + barre de recherche)
+  // Filtrage combiné
   const filteredReceipts = receipts.filter((item) => {
-    // Vérification du filtre par onglet
     const matchesStatus = filterStatus === 'ALL' || item.status === filterStatus;
-    // Vérification de la correspondance textuelle
     const matchesSearch =
       (item.merchant_name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
       (item.id || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (item.employee_name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
       (item.total_amount_ttc || '').includes(searchTerm);
     return matchesStatus && matchesSearch;
   });
 
-  // Rendu visuel d'un badge de statut formaté
   const renderStatusPill = (status) => {
     switch (status) {
       case 'APPROVED':
@@ -237,15 +380,17 @@ export default function App() {
 
   return (
     <div className="app-container">
-      {/* 1. En-tête principal et navigation par onglets */}
+      {/* ========================================================================= */}
+      {/* 1. EN-TÊTE PRINCIPAL & PROFIL JWT                                         */}
+      {/* ========================================================================= */}
       <header className="app-header">
         <div className="brand-title">
           <ShieldCheck size={28} color="#2563eb" />
           <span>ExpensyGuard</span>
-          <span className="brand-badge">Audit Automatisé</span>
+          <span className="brand-badge">Audit & Collaborateurs</span>
         </div>
 
-        {/* Barre de navigation entre Tableau de bord et Audit dédié */}
+        {/* Navigation */}
         <nav className="main-nav">
           <button
             className={`nav-btn ${activeTab === 'DASHBOARD' ? 'active' : ''}`}
@@ -263,11 +408,43 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Bouton d'actualisation manuelle */}
-        <button className="btn btn-outline" onClick={fetchData} title="Rafraîchir les données">
-          <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
-          Actualiser
-        </button>
+        {/* Espace Utilisateur & Rôle */}
+        <div className="user-profile-bar">
+          {currentUser ? (
+            <div className="user-info-card">
+              <div className={`user-role-badge ${currentUser.role === 'admin' ? 'role-admin' : 'role-user'}`}>
+                {currentUser.role === 'admin' ? <Crown size={13} /> : <User size={13} />}
+                <span>{currentUser.role.toUpperCase()}</span>
+              </div>
+              <div className="user-details">
+                <span className="user-name">{currentUser.name}</span>
+              </div>
+              <button
+                className="btn-icon"
+                onClick={() => setLoginModalOpen(true)}
+                title="Changer de compte ou basculer de rôle"
+              >
+                <KeyRound size={15} />
+              </button>
+              <button
+                className="btn-icon btn-logout"
+                onClick={handleLogout}
+                title="Déconnexion"
+              >
+                <LogOut size={15} />
+              </button>
+            </div>
+          ) : (
+            <button className="btn btn-primary" onClick={() => setLoginModalOpen(true)}>
+              <LogIn size={15} />
+              Se Connecter
+            </button>
+          )}
+
+          <button className="btn btn-outline" onClick={fetchData} title="Rafraîchir les données">
+            <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
+          </button>
+        </div>
       </header>
 
       {/* ========================================================================= */}
@@ -283,6 +460,10 @@ export default function App() {
                 <DollarSign size={18} color="#2563eb" />
               </div>
               <div className="kpi-value">{(stats.total_spent_eur ?? 0).toFixed(2)} €</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                <CheckCircle2 size={12} color="#059669" />
+                <span>Tickets validés uniquement</span>
+              </div>
             </div>
 
             <div className="kpi-card">
@@ -291,6 +472,9 @@ export default function App() {
                 <TrendingUp size={18} color="#059669" />
               </div>
               <div className="kpi-value">{stats.compliance_rate ?? 100}%</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                {stats.approved_count ?? 0} validé(s) / {stats.total_receipts ?? 0} total
+              </div>
             </div>
 
             <div className="kpi-card">
@@ -299,6 +483,9 @@ export default function App() {
                 <CheckCircle2 size={18} color="#059669" />
               </div>
               <div className="kpi-value">{stats.approved_count ?? 0}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                Intégrés dans la comptabilité
+              </div>
             </div>
 
             <div className="kpi-card">
@@ -309,6 +496,9 @@ export default function App() {
               <div className="kpi-value" style={{ color: (stats.review_count ?? 0) > 0 ? '#d97706' : 'inherit' }}>
                 {stats.review_count ?? 0}
               </div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                Nécessitent une validation
+              </div>
             </div>
           </section>
 
@@ -318,7 +508,7 @@ export default function App() {
               <Search size={16} color="var(--text-muted)" />
               <input
                 type="text"
-                placeholder="Rechercher par commerçant ou ID..."
+                placeholder="Rechercher par employé, commerçant ou ID..."
                 className="search-input"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
@@ -344,19 +534,21 @@ export default function App() {
               <thead>
                 <tr>
                   <th>ID Reçu</th>
+                  <th>Employé</th>
                   <th>Commerçant</th>
                   <th>Date</th>
                   <th>Montant TTC</th>
                   <th>Statut</th>
                   <th>Score IA</th>
-                  <th></th>
+                  <th>Photo</th>
+                  <th style={{ textAlign: 'right' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredReceipts.length === 0 ? (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
-                      Aucun reçu enregistré pour le moment dans la base.
+                    <td colSpan={9} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                      Aucun reçu trouvé dans la base de données.
                     </td>
                   </tr>
                 ) : (
@@ -364,6 +556,26 @@ export default function App() {
                     <tr key={receipt.id} onClick={() => setSelectedReceipt(receipt)}>
                       <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, fontSize: '0.8125rem' }}>
                         {receipt.id}
+                      </td>
+                      {/* Bouton pour afficher la fiche de l'employé */}
+                      <td>
+                        <button
+                          type="button"
+                          className="employee-badge-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openEmployeeSheet(receipt.employee_id || 'EMP001');
+                          }}
+                          title="Cliquer pour voir la fiche et les dépenses de l'employé"
+                        >
+                          <span
+                            className="employee-avatar-circle"
+                            style={{ backgroundColor: receipt.employee_avatar_color || '#2563eb' }}
+                          >
+                            {(receipt.employee_name || 'E').substring(0, 2).toUpperCase()}
+                          </span>
+                          <span className="employee-badge-name">{receipt.employee_name || "Alexandre Martin"}</span>
+                        </button>
                       </td>
                       <td style={{ fontWeight: 600 }}>
                         {receipt.merchant_name || "Commerçant Inconnu"}
@@ -382,8 +594,46 @@ export default function App() {
                           {((receipt.confidence_score ?? 0) * 100).toFixed(0)}%
                         </span>
                       </td>
-                      <td style={{ textAlign: 'right', color: 'var(--text-muted)' }}>
-                        <ChevronRight size={16} />
+                      <td>
+                        <button
+                          type="button"
+                          className="btn-image-action"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setImageModalReceipt(receipt);
+                          }}
+                          title="Afficher l'image du reçu"
+                        >
+                          <Eye size={13} />
+                          <span>Photo</span>
+                        </button>
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+                          {/* Bouton Supprimer réservé à l'Admin */}
+                          {currentUser?.role === 'admin' ? (
+                            <button
+                              type="button"
+                              className="btn-delete-action"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDeleteConfirmReceipt(receipt);
+                              }}
+                              title="Supprimer ce reçu (Admin)"
+                            >
+                              <Trash2 size={13} />
+                              <span>Supprimer</span>
+                            </button>
+                          ) : (
+                            <span
+                              className="delete-locked-badge"
+                              title="Suppression réservée à l'administrateur"
+                            >
+                              <Lock size={12} />
+                            </span>
+                          )}
+                          <ChevronRight size={16} color="var(--text-muted)" />
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -406,6 +656,24 @@ export default function App() {
               Importer une Photo de Reçu
             </h3>
 
+            {/* Sélecteur de l'employé soumettant le reçu */}
+            <div style={{ marginBottom: '1.25rem' }}>
+              <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, marginBottom: '0.4rem', color: 'var(--text-secondary)' }}>
+                Collaborateur émetteur de la dépense :
+              </label>
+              <select
+                className="employee-select"
+                value={selectedEmployeeForAudit}
+                onChange={(e) => setSelectedEmployeeForAudit(e.target.value)}
+              >
+                {employees.map((emp) => (
+                  <option key={emp.id} value={emp.id}>
+                    {emp.name} ({emp.department})
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* Zone de drop */}
             <div
               className="upload-dropzone"
@@ -427,14 +695,14 @@ export default function App() {
               </p>
             </div>
 
-            {/* Prévisualisation de l'image sélectionnée */}
+            {/* Prévisualisation */}
             {previewUrl && (
               <div className="preview-box">
                 <img src={previewUrl} alt="Aperçu du ticket" className="preview-image" />
               </div>
             )}
 
-            {/* Bouton de déclenchement de l'audit */}
+            {/* Bouton de déclenchement */}
             <div style={{ marginTop: '1.25rem' }}>
               <button
                 className="btn btn-primary"
@@ -456,7 +724,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* Message d'erreur éventuel */}
             {auditError && (
               <div style={{ marginTop: '1rem', padding: '0.75rem', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '6px', color: '#dc2626', fontSize: '0.8125rem' }}>
                 <AlertTriangle size={16} style={{ verticalAlign: 'middle', marginRight: '0.25rem' }} />
@@ -465,7 +732,7 @@ export default function App() {
             )}
           </div>
 
-          {/* Colonne droite : Résultat direct de l'audit */}
+          {/* Colonne droite : Résultat direct */}
           <div className="audit-card">
             <h3 style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <ShieldCheck size={20} color="#059669" />
@@ -475,7 +742,7 @@ export default function App() {
             {!latestAuditResult && !isAuditing && (
               <div style={{ textAlign: 'center', padding: '3.5rem 1rem', color: 'var(--text-muted)' }}>
                 <FileText size={48} style={{ margin: '0 auto 1rem auto', opacity: 0.4 }} />
-                <p>Sélectionnez une image à gauche et cliquez sur <b>Lancer l'Audit</b> pour voir les extractions et vérifications.</p>
+                <p>Sélectionnez un ticket à gauche et lancez l'audit pour observer les règles de gestion et l'affectation à l'employé.</p>
               </div>
             )}
 
@@ -484,14 +751,13 @@ export default function App() {
                 <RefreshCw size={36} className="animate-spin" color="#2563eb" style={{ margin: '0 auto 1rem auto' }} />
                 <h4 style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Analyse multi-agents en cours</h4>
                 <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
-                  1. Détection de texte OCR $\rightarrow$ 2. Extraction structurée IA $\rightarrow$ 3. Registre SIRENE $\rightarrow$ 4. Règles fiscales
+                  OCR $\rightarrow$ IA $\rightarrow$ SIRENE $\rightarrow$ Empreinte $\rightarrow$ Règles budgétaires
                 </p>
               </div>
             )}
 
             {latestAuditResult && !isAuditing && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                {/* Statut et ID */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '0.75rem' }}>
                   <div>
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
@@ -506,7 +772,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Données clés extraites */}
                 <div className="detail-row">
                   <span className="detail-label">Date :</span>
                   <span className="detail-value">{latestAuditResult.extracted_data?.date || "-"}</span>
@@ -529,7 +794,6 @@ export default function App() {
                   <span className="detail-value">{((latestAuditResult.confidence_score ?? 0) * 100).toFixed(0)}%</span>
                 </div>
 
-                {/* Motifs et justifications */}
                 {latestAuditResult.reasons && latestAuditResult.reasons.length > 0 && (
                   <div>
                     <h4 style={{ fontSize: '0.8125rem', fontWeight: 600, margin: '0.5rem 0 0.25rem 0' }}>Motifs :</h4>
@@ -541,7 +805,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Bouton pour basculer vers le tableau complet */}
                 <button
                   className="btn btn-outline"
                   style={{ width: '100%', justifyContent: 'center', marginTop: '0.5rem' }}
@@ -557,7 +820,453 @@ export default function App() {
       )}
 
       {/* ========================================================================= */}
-      {/* MODALE DE RÉVISION DÉTAILLÉE D'UN REÇU                                  */}
+      {/* MODALE 1 : FICHE EMPLOYÉ AVEC FILTRES TEMPORELS DYNAMIQUES               */}
+      {/* ========================================================================= */}
+      {employeeSheetModal && (
+        <div className="modal-backdrop" onClick={() => setEmployeeSheetModal(null)}>
+          <div className="modal-card employee-modal-card" onClick={(e) => e.stopPropagation()}>
+            {/* En-tête Fiche Collaborateur */}
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <div
+                  className="employee-large-avatar"
+                  style={{ backgroundColor: employeeSheetModal.employee.avatar_color || '#2563eb' }}
+                >
+                  {employeeSheetModal.employee.name.substring(0, 2).toUpperCase()}
+                </div>
+                <div>
+                  <h2 style={{ fontSize: '1.2rem', fontWeight: 700 }}>
+                    {employeeSheetModal.employee.name}
+                  </h2>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
+                    <span style={{ fontFamily: 'var(--font-mono)' }}>{employeeSheetModal.employee.id}</span>
+                    <span>•</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.2rem' }}>
+                      <Briefcase size={12} /> {employeeSheetModal.employee.department}
+                    </span>
+                    <span>•</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.2rem' }}>
+                      <Calendar size={12} /> Embauché(e) le {employeeSheetModal.employee.hire_date}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <button className="btn btn-outline" onClick={() => setEmployeeSheetModal(null)} style={{ padding: '0.25rem 0.5rem' }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              {/* =================================================================== */}
+              {/* BARRE DE FILTRES TEMPORELS (JOUR / MOIS / ANNÉE / TOUT)             */}
+              {/* =================================================================== */}
+              <div className="employee-filter-bar">
+                <div className="filter-title">
+                  <Filter size={15} color="var(--accent-primary)" />
+                  <span>Période des dépenses :</span>
+                </div>
+
+                <div className="filter-period-buttons">
+                  <button
+                    className={`btn-period ${employeePeriodType === 'ALL' ? 'active' : ''}`}
+                    onClick={() => handlePeriodChange('ALL', '')}
+                  >
+                    Tout l'historique
+                  </button>
+
+                  <button
+                    className={`btn-period ${employeePeriodType === 'YEAR' ? 'active' : ''}`}
+                    onClick={() => handlePeriodChange('YEAR', '2026')}
+                  >
+                    Année
+                  </button>
+
+                  <button
+                    className={`btn-period ${employeePeriodType === 'MONTH' ? 'active' : ''}`}
+                    onClick={() => handlePeriodChange('MONTH', '2026-10')}
+                  >
+                    Mois
+                  </button>
+
+                  <button
+                    className={`btn-period ${employeePeriodType === 'DAY' ? 'active' : ''}`}
+                    onClick={() => handlePeriodChange('DAY', new Date().toISOString().split('T')[0])}
+                  >
+                    Jour
+                  </button>
+                </div>
+
+                {/* Sélecteur dynamique selon le mode */}
+                {employeePeriodType === 'YEAR' && (
+                  <div className="period-input-wrapper">
+                    <select
+                      className="period-select"
+                      value={employeeDateValue || '2026'}
+                      onChange={(e) => handlePeriodChange('YEAR', e.target.value)}
+                    >
+                      {['2026', '2025', '2024', '2023', '2022', '2021', '2020'].map((y) => (
+                        <option key={y} value={y}>Année {y}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {employeePeriodType === 'MONTH' && (
+                  <div className="period-input-wrapper">
+                    <input
+                      type="month"
+                      className="period-date-input"
+                      value={employeeDateValue || '2026-10'}
+                      onChange={(e) => handlePeriodChange('MONTH', e.target.value)}
+                    />
+                  </div>
+                )}
+
+                {employeePeriodType === 'DAY' && (
+                  <div className="period-input-wrapper">
+                    <input
+                      type="date"
+                      className="period-date-input"
+                      value={employeeDateValue || new Date().toISOString().split('T')[0]}
+                      onChange={(e) => handlePeriodChange('DAY', e.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Indicateurs agrégés pour la période sélectionnée */}
+              <div className="employee-kpis-grid">
+                <div className="emp-kpi-card highlight">
+                  <span className="emp-kpi-label">Total Dépenses Validées</span>
+                  <span className="emp-kpi-val">
+                    {(employeeSheetModal.stats?.total_spent_eur ?? 0).toFixed(2)} €
+                  </span>
+                  <span className="emp-kpi-sub">Sur la période sélectionnée</span>
+                </div>
+
+                <div className="emp-kpi-card">
+                  <span className="emp-kpi-label">Tickets Validés</span>
+                  <span className="emp-kpi-val" style={{ color: '#059669' }}>
+                    {employeeSheetModal.stats?.approved_count ?? 0}
+                  </span>
+                  <span className="emp-kpi-sub">Conformes</span>
+                </div>
+
+                <div className="emp-kpi-card">
+                  <span className="emp-kpi-label">À Réviser</span>
+                  <span className="emp-kpi-val" style={{ color: '#d97706' }}>
+                    {employeeSheetModal.stats?.review_count ?? 0}
+                  </span>
+                  <span className="emp-kpi-sub">En attente</span>
+                </div>
+
+                <div className="emp-kpi-card">
+                  <span className="emp-kpi-label">Rejetés</span>
+                  <span className="emp-kpi-val" style={{ color: '#dc2626' }}>
+                    {employeeSheetModal.stats?.rejected_count ?? 0}
+                  </span>
+                  <span className="emp-kpi-sub">Non remboursés</span>
+                </div>
+              </div>
+
+              {/* Liste des tickets correspondants */}
+              <div>
+                <h4 style={{ fontSize: '0.875rem', fontWeight: 600, margin: '1rem 0 0.5rem 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>Historique des reçus ({employeeSheetModal.receipts?.length || 0})</span>
+                  {employeeSheetLoading && <RefreshCw size={14} className="animate-spin" />}
+                </h4>
+
+                <div className="employee-receipts-table-wrapper">
+                  {employeeSheetModal.receipts?.length === 0 ? (
+                    <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.8125rem' }}>
+                      Aucune dépense enregistrée pour ce collaborateur sur cette période.
+                    </div>
+                  ) : (
+                    <table className="receipts-table small-table">
+                      <thead>
+                        <tr>
+                          <th>ID</th>
+                          <th>Commerçant</th>
+                          <th>Date</th>
+                          <th>Montant TTC</th>
+                          <th>Statut</th>
+                          <th>Photo</th>
+                          {currentUser?.role === 'admin' && <th>Action</th>}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {employeeSheetModal.receipts.map((r) => (
+                          <tr key={r.id}>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', fontWeight: 600 }}>{r.id}</td>
+                            <td>{r.merchant_name}</td>
+                            <td>{r.receipt_date}</td>
+                            <td style={{ fontWeight: 700 }}>{r.total_amount_ttc} €</td>
+                            <td>{renderStatusPill(r.status)}</td>
+                            <td>
+                              <button
+                                type="button"
+                                className="btn-image-action"
+                                onClick={() => setImageModalReceipt(r)}
+                              >
+                                <Eye size={12} />
+                                <span>Voir</span>
+                              </button>
+                            </td>
+                            {currentUser?.role === 'admin' && (
+                              <td>
+                                <button
+                                  type="button"
+                                  className="btn-delete-action"
+                                  onClick={() => setDeleteConfirmReceipt(r)}
+                                  title="Supprimer définitivement"
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="actions-footer">
+              <button className="btn btn-primary" onClick={() => setEmployeeSheetModal(null)}>
+                Fermer la Fiche
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODALE 2 : CONFIRMATION DE SUPPRESSION (ADMIN UNIQUEMENT)                 */}
+      {/* ========================================================================= */}
+      {deleteConfirmReceipt && (
+        <div className="modal-backdrop" onClick={() => setDeleteConfirmReceipt(null)}>
+          <div className="modal-card delete-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <div style={{ background: '#fef2f2', padding: '0.5rem', borderRadius: '50%', color: '#dc2626' }}>
+                  <Trash2 size={22} />
+                </div>
+                <div>
+                  <h3 style={{ fontSize: '1.15rem', fontWeight: 700, color: '#dc2626' }}>
+                    Confirmer la suppression
+                  </h3>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    Action d'administration irréversible
+                  </span>
+                </div>
+              </div>
+              <button className="btn btn-outline" onClick={() => setDeleteConfirmReceipt(null)} style={{ padding: '0.25rem 0.5rem' }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                Êtes-vous sûr de vouloir supprimer définitivement le reçu <b>#{deleteConfirmReceipt.id}</b> de <b>{deleteConfirmReceipt.merchant_name}</b> ({deleteConfirmReceipt.total_amount_ttc} €) ?
+              </p>
+              <p style={{ fontSize: '0.8125rem', color: '#dc2626', background: '#fef2f2', padding: '0.6rem 0.75rem', borderRadius: '6px' }}>
+                ⚠️ Cette action supprimera l'enregistrement de la base de données ainsi que le fichier image correspondant dans <code>data_images/</code>.
+              </p>
+            </div>
+
+            <div className="actions-footer">
+              <button className="btn btn-outline" onClick={() => setDeleteConfirmReceipt(null)} disabled={isDeleting}>
+                Annuler
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={() => handleDeleteReceipt(deleteConfirmReceipt.id)}
+                disabled={isDeleting}
+              >
+                {isDeleting ? <RefreshCw size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                Supprimer Définitivement
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODALE 3 : AUTHENTIFICATION & SÉLECTEUR DE COMPTE (ADMIN / USER)          */}
+      {/* ========================================================================= */}
+      {loginModalOpen && (
+        <div className="modal-backdrop" onClick={() => setLoginModalOpen(false)}>
+          <div className="modal-card login-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <Shield size={24} color="#2563eb" />
+                <div>
+                  <h3 style={{ fontSize: '1.2rem', fontWeight: 700 }}>Authentification JWT</h3>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Contrôle d'accès par rôle</span>
+                </div>
+              </div>
+              <button className="btn btn-outline" onClick={() => setLoginModalOpen(false)} style={{ padding: '0.25rem 0.5rem' }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              {/* Boutons d'accès rapide 1-clic pour test instantané */}
+              <div style={{ marginBottom: '1rem' }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '0.5rem', textTransform: 'uppercase' }}>
+                  Connexion rapide pour démonstration :
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                  <button
+                    type="button"
+                    className="quick-role-btn role-admin-btn"
+                    onClick={() => handleLogin({ username: 'admin', password: 'admin123' })}
+                  >
+                    <Crown size={18} color="#b45309" />
+                    <div>
+                      <strong style={{ display: 'block', fontSize: '0.875rem' }}>Compte ADMIN</strong>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Peut supprimer des reçus</span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="quick-role-btn role-user-btn"
+                    onClick={() => handleLogin({ username: 'user', password: 'user123' })}
+                  >
+                    <User size={18} color="#2563eb" />
+                    <div>
+                      <strong style={{ display: 'block', fontSize: '0.875rem' }}>Compte USER</strong>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Consultation standard</span>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Formulaire manuel */}
+              <form onSubmit={(e) => { e.preventDefault(); handleLogin(); }} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, marginBottom: '0.25rem' }}>Nom d'utilisateur :</label>
+                  <input
+                    type="text"
+                    className="search-input"
+                    style={{ border: '1px solid var(--border-color)', borderRadius: '6px', padding: '0.5rem 0.75rem', width: '100%' }}
+                    value={loginForm.username}
+                    onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.8125rem', fontWeight: 600, marginBottom: '0.25rem' }}>Mot de passe :</label>
+                  <input
+                    type="password"
+                    className="search-input"
+                    style={{ border: '1px solid var(--border-color)', borderRadius: '6px', padding: '0.5rem 0.75rem', width: '100%' }}
+                    value={loginForm.password}
+                    onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+                  />
+                </div>
+
+                {loginError && (
+                  <div style={{ color: '#dc2626', background: '#fef2f2', padding: '0.5rem', borderRadius: '6px', fontSize: '0.8125rem' }}>
+                    {loginError}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  style={{ justifyContent: 'center', marginTop: '0.5rem', padding: '0.65rem' }}
+                  disabled={loginLoading}
+                >
+                  {loginLoading ? <RefreshCw size={16} className="animate-spin" /> : <LogIn size={16} />}
+                  Se Connecter avec JWT
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODALE 4 : AFFICHAGE DE L'IMAGE DU REÇU                                  */}
+      {/* ========================================================================= */}
+      {imageModalReceipt && (
+        <div className="modal-backdrop" onClick={() => setImageModalReceipt(null)}>
+          <div className="modal-card image-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                <ImageIcon size={22} color="#2563eb" />
+                <div>
+                  <h2 style={{ fontSize: '1.15rem', fontWeight: 700 }}>
+                    {imageModalReceipt.merchant_name || "Photo du Reçu"}
+                  </h2>
+                  <span style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                    ID #{imageModalReceipt.id} • {imageModalReceipt.receipt_date || "Date inconnue"}
+                  </span>
+                </div>
+              </div>
+              <button className="btn btn-outline" onClick={() => setImageModalReceipt(null)} style={{ padding: '0.25rem 0.5rem' }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-subtle)', padding: '0.75rem 1rem', borderRadius: 'var(--radius-sm)' }}>
+                <div>
+                  <span style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>Montant TTC : </span>
+                  <strong style={{ color: '#2563eb', fontSize: '1.1rem' }}>{imageModalReceipt.total_amount_ttc || "0.00"} €</strong>
+                </div>
+                <div>
+                  {renderStatusPill(imageModalReceipt.status)}
+                </div>
+              </div>
+
+              <div className="receipt-image-container">
+                <img
+                  src={`${API_BASE_URL}/api/v1/receipts/${imageModalReceipt.id}/image`}
+                  alt={`Reçu ${imageModalReceipt.id}`}
+                  className="receipt-modal-image"
+                  onError={(e) => {
+                    e.currentTarget.style.display = 'none';
+                    const fallback = e.currentTarget.parentElement?.querySelector('.image-fallback-box');
+                    if (fallback) fallback.style.display = 'flex';
+                  }}
+                />
+                <div className="image-fallback-box" style={{ display: 'none' }}>
+                  <FileText size={44} color="#94a3b8" />
+                  <p style={{ fontWeight: 600, color: 'var(--text-primary)', marginTop: '0.5rem' }}>Image non disponible</p>
+                  <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    Le fichier image n'a pas été trouvé dans le dossier <code>data_images/</code>.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="actions-footer" style={{ justifyContent: 'space-between' }}>
+              <button
+                className="btn btn-outline"
+                onClick={() => {
+                  const r = imageModalReceipt;
+                  setImageModalReceipt(null);
+                  setSelectedReceipt(r);
+                }}
+              >
+                <FileText size={15} />
+                Ouvrir la fiche d'audit complète
+              </button>
+              <button className="btn btn-primary" onClick={() => setImageModalReceipt(null)}>
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODALE 5 : RÉVISION DÉTAILLÉE D'UN REÇU                                  */}
       {/* ========================================================================= */}
       {selectedReceipt && (
         <div className="modal-backdrop" onClick={() => setSelectedReceipt(null)}>
@@ -575,6 +1284,19 @@ export default function App() {
             </div>
 
             <div className="modal-body">
+              <div className="detail-row">
+                <span className="detail-label">Collaborateur</span>
+                <span className="detail-value" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span
+                    className="employee-avatar-circle"
+                    style={{ backgroundColor: selectedReceipt.employee_avatar_color || '#2563eb', width: '20px', height: '20px', fontSize: '0.65rem' }}
+                  >
+                    {(selectedReceipt.employee_name || 'E').substring(0, 2).toUpperCase()}
+                  </span>
+                  {selectedReceipt.employee_name || "Alexandre Martin"} ({selectedReceipt.employee_department || "Général"})
+                </span>
+              </div>
+
               <div className="detail-row">
                 <span className="detail-label">Commerçant émetteur</span>
                 <span className="detail-value">{selectedReceipt.merchant_name || "Inconnu"}</span>
@@ -598,13 +1320,28 @@ export default function App() {
               </div>
 
               <div className="detail-row">
+                <span className="detail-label">Photo du ticket</span>
+                <button
+                  type="button"
+                  className="btn-image-action"
+                  onClick={() => {
+                    const current = selectedReceipt;
+                    setSelectedReceipt(null);
+                    setImageModalReceipt(current);
+                  }}
+                >
+                  <Eye size={13} />
+                  <span>Afficher l'image</span>
+                </button>
+              </div>
+
+              <div className="detail-row">
                 <span className="detail-label">Empreinte SHA-256</span>
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                   {selectedReceipt.fingerprint ? `${selectedReceipt.fingerprint.substring(0, 16)}...` : "-"}
                 </span>
               </div>
 
-              {/* Articles extraits si disponibles */}
               {selectedReceipt.extracted?.items && selectedReceipt.extracted.items.length > 0 && (
                 <div>
                   <h4 style={{ fontSize: '0.8125rem', fontWeight: 600, margin: '0.75rem 0 0.5rem 0' }}>Articles Détectés :</h4>
@@ -619,7 +1356,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Motifs d'audit */}
               {selectedReceipt.audit?.reasons && selectedReceipt.audit.reasons.length > 0 && (
                 <div>
                   <h4 style={{ fontSize: '0.8125rem', fontWeight: 600, margin: '0.75rem 0 0.25rem 0' }}>Motifs d'Audit :</h4>
@@ -632,20 +1368,38 @@ export default function App() {
               )}
             </div>
 
-            {/* Actions de validation/rejet */}
-            <div className="actions-footer">
-              <button
-                className="btn btn-danger"
-                onClick={() => handleUpdateStatus(selectedReceipt.id, 'REJECTED')}
-              >
-                Rejeter
-              </button>
-              <button
-                className="btn btn-success"
-                onClick={() => handleUpdateStatus(selectedReceipt.id, 'APPROVED')}
-              >
-                Valider Définitivement
-              </button>
+            <div className="actions-footer" style={{ justifyContent: 'space-between' }}>
+              <div>
+                {currentUser?.role === 'admin' && (
+                  <button
+                    className="btn btn-danger"
+                    style={{ background: '#fee2e2', color: '#dc2626', borderColor: '#fca5a5' }}
+                    onClick={() => {
+                      const r = selectedReceipt;
+                      setSelectedReceipt(null);
+                      setDeleteConfirmReceipt(r);
+                    }}
+                  >
+                    <Trash2 size={15} />
+                    Supprimer
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.75rem' }}>
+                <button
+                  className="btn btn-danger"
+                  onClick={() => handleUpdateStatus(selectedReceipt.id, 'REJECTED')}
+                >
+                  Rejeter
+                </button>
+                <button
+                  className="btn btn-success"
+                  onClick={() => handleUpdateStatus(selectedReceipt.id, 'APPROVED')}
+                >
+                  Valider Définitivement
+                </button>
+              </div>
             </div>
           </div>
         </div>

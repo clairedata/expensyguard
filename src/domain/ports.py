@@ -69,6 +69,8 @@ class ReceiptRepositoryPort(ABC):
         fingerprint: str,
         extraction: Optional[ReceiptExtraction],
         decision: AuditDecision,
+        image_filename: Optional[str] = None,
+        employee_id: Optional[str] = None,
     ) -> None:
         # Signature de persistance de l'audit
         pass

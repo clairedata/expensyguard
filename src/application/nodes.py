@@ -250,6 +250,10 @@ def business_rules_and_decision_node(
     # Initialisation de la liste des justifications
     reasons = []
 
+    # Récupération de l'éventuel nom de fichier image et identifiant d'employé dans l'état
+    image_filename = state.get("file_name")
+    employee_id = state.get("employee_id")
+
     # Cas 1 : Absence totale de données extraites (échec amont ou image illisible)
     if not extracted:
         # Construction d'une décision de rejet
@@ -269,6 +273,8 @@ def business_rules_and_decision_node(
             fingerprint=fingerprint,
             extraction=None,
             decision=decision,
+            image_filename=image_filename,
+            employee_id=employee_id,
         )
         # Renvoi de la décision
         return {"decision": decision}
@@ -292,6 +298,8 @@ def business_rules_and_decision_node(
             fingerprint=f"dup_{receipt_id}_{dup_check.fingerprint[:12]}",
             extraction=extracted,
             decision=decision,
+            image_filename=image_filename,
+            employee_id=employee_id,
         )
         # Renvoi de la décision
         return {"decision": decision}
@@ -373,6 +381,8 @@ def business_rules_and_decision_node(
         fingerprint=fingerprint,
         extraction=extracted,
         decision=decision,
+        image_filename=image_filename,
+        employee_id=employee_id,
     )
 
     # Renvoi de l'état finalisé avec la décision

@@ -92,6 +92,21 @@ class SQLiteReceiptRepository(ReceiptRepositoryPort):
     def _init_db(self) -> None:
         # Récupération de la connexion via le gestionnaire de contexte
         with self._get_connection() as conn:
+            # Création de la table des employés
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS employees (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    email TEXT UNIQUE,
+                    department TEXT NOT NULL,
+                    hire_date TEXT NOT NULL,
+                    avatar_color TEXT DEFAULT '#2563eb',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
             # Création de la table des reçus stockant l'empreinte unique
             conn.execute(
                 """
@@ -105,10 +120,24 @@ class SQLiteReceiptRepository(ReceiptRepositoryPort):
                     confidence_score REAL NOT NULL,
                     extracted_json TEXT,
                     audit_json TEXT NOT NULL,
+                    image_filename TEXT,
+                    employee_id TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+
+            # Migrations non destructives pour ajouter les colonnes si la base existait déjà
+            try:
+                conn.execute("ALTER TABLE receipts ADD COLUMN image_filename TEXT")
+            except Exception:
+                pass
+
+            try:
+                conn.execute("ALTER TABLE receipts ADD COLUMN employee_id TEXT")
+            except Exception:
+                pass
+
             # Création d'un index sur l'empreinte pour accélérer les recherches de doublons
             conn.execute(
                 """
@@ -116,6 +145,31 @@ class SQLiteReceiptRepository(ReceiptRepositoryPort):
                 ON receipts(fingerprint)
                 """
             )
+
+            # Création d'un index sur l'employé
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_receipts_employee 
+                ON receipts(employee_id)
+                """
+            )
+
+            # Insertion de données initiales d'employés si la table est vide
+            cur = conn.execute("SELECT COUNT(*) as count FROM employees")
+            if cur.fetchone()["count"] == 0:
+                seed_employees = [
+                    ("EMP001", "Alexandre Martin", "a.martin@entreprise.fr", "Commercial & Ventes", "2022-03-15", "#2563eb"),
+                    ("EMP002", "Sophie Durand", "s.durand@entreprise.fr", "Marketing & Communication", "2023-06-01", "#7c3aed"),
+                    ("EMP003", "Thomas Leroy", "t.leroy@entreprise.fr", "Ingénierie & Tech", "2021-11-10", "#059669"),
+                    ("EMP004", "Élodie Petit", "e.petit@entreprise.fr", "Direction Générale", "2020-01-20", "#d97706"),
+                ]
+                conn.executemany(
+                    "INSERT INTO employees (id, name, email, department, hire_date, avatar_color) VALUES (?, ?, ?, ?, ?, ?)",
+                    seed_employees,
+                )
+
+            # Attribution d'un employé par défaut (EMP001) aux reçus existants sans employé
+            conn.execute("UPDATE receipts SET employee_id = 'EMP001' WHERE employee_id IS NULL OR employee_id = ''")
 
     # Calcul de l'empreinte unique SHA-256 standardisée
     def compute_fingerprint(self, merchant_name: str, date_str: str, amount: Decimal) -> str:
@@ -163,6 +217,8 @@ class SQLiteReceiptRepository(ReceiptRepositoryPort):
         fingerprint: str,
         extraction: Optional[ReceiptExtraction],
         decision: AuditDecision,
+        image_filename: Optional[str] = None,
+        employee_id: Optional[str] = None,
     ) -> None:
         # Sérialisation des données extraites en JSON
         extracted_json = extraction.model_dump_json() if extraction else None
@@ -177,14 +233,31 @@ class SQLiteReceiptRepository(ReceiptRepositoryPort):
 
         # Connexion à la base pour insérer l'enregistrement
         with self._get_connection() as conn:
+            # Récupération d'éventuelles valeurs existantes si non fournies
+            if image_filename is None or employee_id is None:
+                try:
+                    cur = conn.execute("SELECT image_filename, employee_id FROM receipts WHERE id = ?", (receipt_id,))
+                    existing = cur.fetchone()
+                    if existing:
+                        if image_filename is None and existing["image_filename"]:
+                            image_filename = existing["image_filename"]
+                        if employee_id is None and existing["employee_id"]:
+                            employee_id = existing["employee_id"]
+                except Exception:
+                    pass
+
+            # Employé par défaut si toujours None
+            if not employee_id:
+                employee_id = "EMP001"
+
             # Insertion avec gestion de conflit (remplacement si ré-audit forcé)
             conn.execute(
                 """
                 INSERT OR REPLACE INTO receipts (
                     id, fingerprint, merchant_name, receipt_date, 
                     total_amount_ttc, status, confidence_score, 
-                    extracted_json, audit_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    extracted_json, audit_json, image_filename, employee_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     receipt_id,
@@ -196,29 +269,37 @@ class SQLiteReceiptRepository(ReceiptRepositoryPort):
                     decision.confidence_score,
                     extracted_json,
                     audit_json,
+                    image_filename,
+                    employee_id,
                 ),
             )
 
-    # Récupérer la liste complète des reçus pour le tableau de bord Frontend
+    # Récupérer la liste complète des reçus enrichis avec les données employés
     def list_receipts(self, limit: int = 100) -> List[Dict[str, Any]]:
         # Connexion à la base de données
         with self._get_connection() as conn:
-            # Sélection des reçus ordonnés du plus récent au plus ancien
+            # Sélection avec jointure optionnelle sur les employés
             cursor = conn.execute(
-                "SELECT * FROM receipts ORDER BY created_at DESC LIMIT ?",
+                """
+                SELECT 
+                    r.*,
+                    e.name as employee_name,
+                    e.department as employee_department,
+                    e.avatar_color as employee_avatar_color
+                FROM receipts r
+                LEFT JOIN employees e ON r.employee_id = e.id
+                ORDER BY r.created_at DESC 
+                LIMIT ?
+                """,
                 (limit,),
             )
             # Récupération des lignes
             rows = cursor.fetchall()
-            # Transformation en liste de dictionnaires avec désérialisation JSON
             results = []
-            # Parcours des lignes retournées
             for row in rows:
-                # Décodage de l'objet audit_json
                 audit_data = json.loads(row["audit_json"]) if row["audit_json"] else {}
-                # Décodage de l'objet extracted_json
                 extracted_data = json.loads(row["extracted_json"]) if row["extracted_json"] else None
-                # Construction de la fiche structurée pour le front
+                img_file = row["image_filename"] if "image_filename" in row.keys() else None
                 results.append({
                     "id": row["id"],
                     "fingerprint": row["fingerprint"],
@@ -228,22 +309,151 @@ class SQLiteReceiptRepository(ReceiptRepositoryPort):
                     "status": row["status"],
                     "confidence_score": row["confidence_score"],
                     "created_at": row["created_at"],
+                    "image_filename": img_file,
+                    "image_url": f"/data_images/{img_file}" if img_file else None,
+                    "employee_id": row["employee_id"] or "EMP001",
+                    "employee_name": row["employee_name"] or "Employé",
+                    "employee_department": row["employee_department"] or "Général",
+                    "employee_avatar_color": row["employee_avatar_color"] or "#2563eb",
                     "audit": audit_data,
                     "extracted": extracted_data,
                 })
-            # Renvoi des résultats
             return results
 
-    # Récupérer les statistiques globales pour les cartes KPI du Frontend
+    # Récupérer la liste de tous les employés
+    def list_employees(self) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.execute("SELECT * FROM employees ORDER BY name ASC")
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    # Récupérer la fiche complète d'un employé avec statistiques filtrées dans le temps
+    def get_employee_sheet(
+        self,
+        employee_id: str,
+        period_type: str = "ALL",  # 'ALL', 'DAY', 'MONTH', 'YEAR'
+        date_value: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            # Récupération de l'employé
+            cur_emp = conn.execute("SELECT * FROM employees WHERE id = ?", (employee_id,))
+            emp = cur_emp.fetchone()
+            if not emp:
+                return None
+
+            emp_dict = dict(emp)
+
+            # Construction de la clause de filtrage temporel sur la date du reçu (ou date de création)
+            query_conditions = ["employee_id = ?"]
+            params: List[Any] = [employee_id]
+
+            if period_type == "DAY" and date_value:
+                query_conditions.append("(receipt_date = ? OR created_at LIKE ?)")
+                params.extend([date_value, f"{date_value}%"])
+            elif period_type == "MONTH" and date_value:
+                query_conditions.append("(receipt_date LIKE ? OR created_at LIKE ?)")
+                params.extend([f"{date_value}%", f"{date_value}%"])
+            elif period_type == "YEAR" and date_value:
+                query_conditions.append("(receipt_date LIKE ? OR created_at LIKE ?)")
+                params.extend([f"{date_value}%", f"{date_value}%"])
+
+            where_clause = " WHERE " + " AND ".join(query_conditions)
+
+            # Calcul des métriques agrégées pour cette période
+            stats_query = f"""
+                SELECT 
+                    COUNT(*) as total_count,
+                    COALESCE(SUM(CASE WHEN status = 'APPROVED' THEN CAST(total_amount_ttc AS REAL) ELSE 0.0 END), 0.0) as total_sum,
+                    SUM(CASE WHEN status = 'APPROVED' THEN 1 ELSE 0 END) as approved_count,
+                    SUM(CASE WHEN status = 'FLAGGED_FOR_REVIEW' THEN 1 ELSE 0 END) as review_count,
+                    SUM(CASE WHEN status = 'REJECTED' THEN 1 ELSE 0 END) as rejected_count
+                FROM receipts
+                {where_clause}
+            """
+            cur_stats = conn.execute(stats_query, tuple(params))
+            stats_row = cur_stats.fetchone()
+
+            total_count = stats_row["total_count"] or 0
+            total_sum = round(stats_row["total_sum"] or 0.0, 2)
+            approved = stats_row["approved_count"] or 0
+            review = stats_row["review_count"] or 0
+            rejected = stats_row["rejected_count"] or 0
+
+            # Récupération des reçus correspondants
+            receipts_query = f"""
+                SELECT * FROM receipts 
+                {where_clause}
+                ORDER BY receipt_date DESC, created_at DESC
+            """
+            cur_receipts = conn.execute(receipts_query, tuple(params))
+            receipt_rows = cur_receipts.fetchall()
+
+            receipts_list = []
+            for r in receipt_rows:
+                img_file = r["image_filename"] if "image_filename" in r.keys() else None
+                receipts_list.append({
+                    "id": r["id"],
+                    "merchant_name": r["merchant_name"],
+                    "receipt_date": r["receipt_date"],
+                    "total_amount_ttc": r["total_amount_ttc"],
+                    "status": r["status"],
+                    "confidence_score": r["confidence_score"],
+                    "created_at": r["created_at"],
+                    "image_url": f"/data_images/{img_file}" if img_file else None,
+                })
+
+            return {
+                "employee": emp_dict,
+                "period": {
+                    "type": period_type,
+                    "date_value": date_value,
+                },
+                "stats": {
+                    "total_receipts": total_count,
+                    "total_spent_eur": total_sum,
+                    "approved_count": approved,
+                    "review_count": review,
+                    "rejected_count": rejected,
+                },
+                "receipts": receipts_list,
+            }
+
+    # Suppression d'un reçu (Action réservée à l'administrateur)
+    def delete_receipt(self, receipt_id: str) -> bool:
+        with self._get_connection() as conn:
+            # Récupération du nom de fichier image avant suppression
+            cur = conn.execute("SELECT image_filename FROM receipts WHERE id = ?", (receipt_id,))
+            row = cur.fetchone()
+            if not row:
+                return False
+
+            img_file = row["image_filename"] if "image_filename" in row.keys() else None
+
+            # Suppression de la ligne en base
+            conn.execute("DELETE FROM receipts WHERE id = ?", (receipt_id,))
+
+            # Suppression physique de l'image si elle existe sur disque
+            if img_file:
+                project_root = Path(__file__).resolve().parent.parent.parent
+                img_path = project_root / "data_images" / img_file
+                if img_path.exists():
+                    try:
+                        img_path.unlink()
+                    except Exception:
+                        pass
+
+            return True
+
+    # Récupérer les statistiques globales pour les cartes KPI du Frontend (ne compte que les reçus APPROVED)
     def get_statistics(self) -> Dict[str, Any]:
         # Connexion à la base
         with self._get_connection() as conn:
-            # Requête d'agrégation globale
+            # Requête d'agrégation globale - total_sum ne compte STRICTEMENT que les tickets 'APPROVED'
             cursor = conn.execute(
                 """
                 SELECT 
                     COUNT(*) as total_count,
-                    SUM(CAST(total_amount_ttc AS REAL)) as total_sum,
+                    COALESCE(SUM(CASE WHEN status = 'APPROVED' THEN CAST(total_amount_ttc AS REAL) ELSE 0.0 END), 0.0) as total_sum,
                     SUM(CASE WHEN status = 'APPROVED' THEN 1 ELSE 0 END) as approved_count,
                     SUM(CASE WHEN status = 'FLAGGED_FOR_REVIEW' THEN 1 ELSE 0 END) as review_count,
                     SUM(CASE WHEN status = 'REJECTED' THEN 1 ELSE 0 END) as rejected_count
